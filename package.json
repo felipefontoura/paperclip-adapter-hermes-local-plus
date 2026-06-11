@@ -1,0 +1,68 @@
+{
+  "name": "@felipefontoura/paperclip-adapter-hermes-local-plus",
+  "version": "0.1.11",
+  "description": "Paperclip external adapter \u2014 overrides the built-in hermes_local adapter with Instructions tab support, default toolsets, and Paperclip-managed skill symlinks. Plug-and-play replacement for hermes-paperclip-adapter (Nous Research) on a managed Paperclip + Hermes deployment.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./server": {
+      "import": "./dist/server/index.js",
+      "types": "./dist/server/index.d.ts"
+    },
+    "./ui": {
+      "import": "./dist/ui/index.js",
+      "types": "./dist/ui/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@paperclipai/adapter-utils": "^2026.325.0",
+    "js-yaml": "^4.2.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.0.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "paperclip",
+    "hermes",
+    "hermes-agent",
+    "adapter",
+    "ai-agent",
+    "instructions-bundle"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/felipefontoura/paperclip-adapter-hermes-local-plus.git"
+  },
+  "homepage": "https://github.com/felipefontoura/paperclip-adapter-hermes-local-plus#readme",
+  "bugs": {
+    "url": "https://github.com/felipefontoura/paperclip-adapter-hermes-local-plus/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,100 @@
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to release (e.g. v0.1.0). The tag must already exist.
+        required: true
+
+permissions:
+  contents: write   # gh release create
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: build + publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Resolve version
+        id: version
+        run: |
+          REF="${{ inputs.tag || github.ref_name }}"
+          VERSION="${REF#v}"
+          echo "tag=$REF" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile --config.verify-deps-before-run=false --config.dangerouslyAllowAllBuilds=true
+
+      - name: Typecheck + build
+        run: |
+          pnpm typecheck
+          pnpm build
+
+      - name: Verify package.json version matches tag
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$PKG_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+            echo "package.json version ($PKG_VERSION) does not match tag (${{ steps.version.outputs.version }})" >&2
+            exit 1
+          fi
+
+      - name: Publish to npm
+        if: env.NPM_TOKEN != ''
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # setup-node leaves a project-local .npmrc with a placeholder
+          # NODE_AUTH_TOKEN that nothing expands at publish time. Strip it,
+          # then write the real token to $HOME/.npmrc.
+          rm -f .npmrc
+          {
+            echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}"
+            echo "registry=https://registry.npmjs.org/"
+            echo "always-auth=true"
+          } > "$HOME/.npmrc"
+          npm publish --access public
+
+      - name: Pack tarball (artifact)
+        run: pnpm pack
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NOTES_FILE=$(mktemp)
+          awk -v v="${{ steps.version.outputs.version }}" '
+            $0 ~ "^## \\[" v "\\]" {flag=1; next}
+            flag && $0 ~ "^## \\[" {exit}
+            flag {print}
+          ' CHANGELOG.md > "$NOTES_FILE"
+          if [ ! -s "$NOTES_FILE" ]; then
+            echo "Release ${{ steps.version.outputs.tag }}" > "$NOTES_FILE"
+          fi
+          # Delete a previous release at the same tag so we can re-publish cleanly.
+          gh release delete "${{ steps.version.outputs.tag }}" --yes 2>/dev/null || true
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --notes-file "$NOTES_FILE" \
+            *.tgz
