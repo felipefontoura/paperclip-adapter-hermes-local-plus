@@ -1,36 +1,11 @@
 /**
- * Server-side execution — fork of hermes-paperclip-adapter@0.3.0 with:
- *
- *  - Patch #2: readBundleEntry() + buildPrompt prepends the agent bundle
- *    (SOUL.md + AGENTS.md + HEARTBEAT.md + TOOLS.md from v0.1.12;
- *    AGENTS.md only on v0.1.0-v0.1.11) before the rendered template, so
- *    Hermes sees the Paperclip-managed identity. Upstream ignored the
- *    bundle even when Paperclip injected `instructionsFilePath`.
- *
- *  - Patch #3: default toolsets become "terminal,skills" when the agent
- *    leaves the field blank, so Hermes auto-exposes `skills_list` /
- *    `skill_view` tools and the materialised Paperclip skill symlinks
- *    are reachable.
- *
- *  - v0.1.3 / Fix #1 — `resolveHermesCommand` defaults the Command field
- *    to `/usr/local/bin/hermes-paperclip` (the wrapper bento installs)
- *    when the user leaves it blank, with `hermes` on PATH as the
- *    last-resort fallback. Aluno leigo never has to type a path.
- *
- *  - v0.1.3 / Fix #2 — `wrappedOnLog` swallows the `session_id: …`
- *    quiet-mode meta line emitted on Hermes' stderr so it doesn't
- *    surface as a red "stderr" panel in the Paperclip Run UI. The
- *    session id is already captured via parseHermesOutput and shown
- *    cleanly in the structured summary.
- *
- *  - v0.1.3 / Fix #3 — `fetchSessionUsage` calls `hermes sessions
- *    export --session-id <id> -` after the run completes, parses the
- *    JSONL row, and populates `executionResult.usage` (input/output/
- *    cache/reasoning tokens) + `executionResult.costUsd`. The Runs
- *    page now shows the real token + cost figures instead of dashes.
- *
- * Everything else mirrors upstream so a future merge upstream of the
- * same features is a straight cherry-pick.
+ * Server-side execution — fork of hermes-paperclip-adapter@0.3.0. Differences
+ * from upstream:
+ *  - Prepends the agent bundle (SOUL/AGENTS/HEARTBEAT/TOOLS) to the prompt.
+ *  - Defaults the toolsets and the hermes binary path when left blank.
+ *  - Filters Hermes' quiet-mode meta lines off stderr.
+ *  - Enriches usage/cost (and recovers the final response) from
+ *    `hermes sessions export` after the run.
  */
 
 import { spawn } from "node:child_process";
@@ -54,10 +29,7 @@ import {
   HERMES_CLI_DEFAULT,
   DEFAULT_TIMEOUT_SEC,
   DEFAULT_GRACE_SEC,
-  DEFAULT_TOOLSETS,
 } from "../shared/constants.js";
-
-import { detectModel, resolveProvider } from "./detect-model.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -78,19 +50,25 @@ function cfgStringArray(v: unknown): string[] | undefined {
     : undefined;
 }
 
-// ---------------------------------------------------------------------------
-// v0.1.15 — Command field defaulting
-// ---------------------------------------------------------------------------
-// Priority order when picking which binary to spawn:
-//   1. Explicit `adapterConfig.hermesCommand` from the UI (whatever the
-//      user typed).
-//   2. `process.env.PAPERCLIP_HERMES_CLI` from the Paperclip container's
-//      compose env — lets the operator (bento) own the path without
-//      republishing the plugin.
-//   3. `HERMES_CLI_DEFAULT` = `/opt/hermes/bin/hermes` — the bento
-//      cross-stack mount target. Absolute path, no PATH dependency.
-// ---------------------------------------------------------------------------
+// Strip `--reasoning-effort <val>` from forwarded extraArgs — `hermes chat`
+// has no such flag and passing it can break the wake. Handles `--flag val`
+// and `--flag=val`.
+function stripReasoningEffort(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--reasoning-effort") {
+      i++; // also skip the value token that follows
+      continue;
+    }
+    if (a.startsWith("--reasoning-effort=")) continue;
+    out.push(a);
+  }
+  return out;
+}
 
+// Binary to spawn: UI `hermesCommand`, else PAPERCLIP_HERMES_CLI (compose env),
+// else the /opt/hermes/bin/hermes mount target.
 function resolveHermesCommand(config: Record<string, unknown>): string {
   return (
     cfgString(config.hermesCommand) ||
@@ -99,16 +77,13 @@ function resolveHermesCommand(config: Record<string, unknown>): string {
   );
 }
 
-// ---------------------------------------------------------------------------
-// v0.1.3 / Fix #3 — Session usage fetch
-// ---------------------------------------------------------------------------
-// After the wake completes, `hermes sessions export --session-id <id> -`
-// prints a single JSONL row with the full metadata: input/output/cache/
-// reasoning tokens, billing provider, and the provider-estimated cost.
-// We parse that and surface it through `executionResult.usage` and
-// `executionResult.costUsd` so the Paperclip Runs page renders real
-// numbers instead of dashes.
-// ---------------------------------------------------------------------------
+// `hermes sessions export --session-id <id> -` prints one JSON row with the
+// session metadata (tokens, cost) and messages. We read it back to surface
+// real usage/cost on the Runs page and to recover the final response.
+interface HermesSessionMessage {
+  role?: string;
+  content?: unknown;
+}
 
 interface HermesSessionMetadata {
   input_tokens?: number;
@@ -119,6 +94,49 @@ interface HermesSessionMetadata {
   estimated_cost_usd?: number;
   actual_cost_usd?: number;
   billing_provider?: string;
+  messages?: HermesSessionMessage[];
+}
+
+type SessionFetchResult = {
+  usage?: UsageSummary;
+  costUsd?: number;
+  responseText?: string;
+};
+
+// Hermes message `content` is either a plain string or an array of parts
+// (`{ type: "text", text }`, `{ type: "tool_use", ... }`, …). Pull the text.
+function extractMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (
+          part &&
+          typeof part === "object" &&
+          typeof (part as { text?: unknown }).text === "string"
+        ) {
+          return (part as { text: string }).text;
+        }
+        return "";
+      })
+      .join("");
+  }
+  return "";
+}
+
+// Walk the exported session backwards and return the last assistant message
+// that actually has text. Used to recover the agent's final answer when
+// Hermes' quiet mode didn't echo it to stdout (only persisted it to state.db).
+function lastAssistantText(messages: HermesSessionMessage[] | undefined): string {
+  if (!Array.isArray(messages)) return "";
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m || m.role !== "assistant") continue;
+    const text = extractMessageText(m.content).trim();
+    if (text) return text;
+  }
+  return "";
 }
 
 async function fetchSessionUsage(
@@ -126,10 +144,10 @@ async function fetchSessionUsage(
   sessionId: string,
   env: Record<string, string>,
   cwd: string,
-): Promise<{ usage?: UsageSummary; costUsd?: number } | null> {
+): Promise<SessionFetchResult | null> {
   return new Promise((resolve) => {
     let settled = false;
-    const settle = (value: { usage?: UsageSummary; costUsd?: number } | null) => {
+    const settle = (value: SessionFetchResult | null) => {
       if (settled) return;
       settled = true;
       resolve(value);
@@ -192,7 +210,8 @@ async function fetchSessionUsage(
             : typeof obj.actual_cost_usd === "number" && obj.actual_cost_usd > 0
               ? obj.actual_cost_usd
               : undefined;
-        settle({ usage: fullUsage, costUsd });
+        const responseText = lastAssistantText(obj.messages) || undefined;
+        settle({ usage: fullUsage, costUsd, responseText });
       } catch {
         settle(null);
       }
@@ -205,34 +224,13 @@ async function fetchSessionUsage(
   });
 }
 
-// ---------------------------------------------------------------------------
-// PATCH #2 — readBundleEntry: pull AGENTS.md (or whichever entry the
-// Paperclip server pinned via `adapterConfig.instructionsFilePath`) off
-// disk so we can prepend it to the rendered prompt.
-//
-// Safe with no Paperclip-managed bundle: every read is guarded by
-// `fs.existsSync`. When the agent has no instructions/, this is a silent
-// no-op and the original prompt template is used unchanged.
-// ---------------------------------------------------------------------------
-
-// v0.1.12 — read ALL four canonical instruction files (SOUL, AGENTS,
-// HEARTBEAT, TOOLS) and concatenate them in semantic order:
-//
-//   SOUL.md       — who the agent is (identity, values, voice)
-//   AGENTS.md     — what the agent does (domain, delegation, peers)
-//   HEARTBEAT.md  — how the agent runs each wake (workflow)
-//   TOOLS.md      — what the agent can call (tool inventory + recipes)
-//
-// Each file is prefixed with a `# <FILENAME>` header so the LLM sees the
-// hierarchy. Markdown headings INSIDE the file content are bumped one
-// level (`# X` → `## X`, `## Y` → `### Y`, etc., up to h5→h6) so authors
-// can write natural `# Something` lines without breaking the outer
-// hierarchy. Files are separated by `---` for clear delimitation.
-//
-// The `instructionsFilePath` server hint (set when
-// supportsInstructionsBundle: true) is still honoured as the canonical
-// pointer to the SOUL.md entry — we use its directory to locate the
-// sibling files. Falls back to the default Paperclip bundle path layout.
+// readBundleEntry: read the Paperclip-managed instruction bundle off disk and
+// prepend it to the prompt so Hermes sees the agent's identity. Reads the four
+// canonical files in semantic order, each prefixed with a `# <FILENAME>`
+// heading; markdown headings inside each file are demoted one level so authors'
+// `# X` lines don't break the outer hierarchy. Located via the server's
+// `instructionsFilePath` hint, else composed from the bundle path layout.
+// Guarded by fs.existsSync — a no-op when the agent has no instructions/.
 const BUNDLE_ORDER = ["SOUL.md", "AGENTS.md", "HEARTBEAT.md", "TOOLS.md"];
 
 function bumpMarkdownHeadings(content: string): string {
@@ -351,112 +349,8 @@ Address the comment, POST a reply if needed, then continue working.
 4. If truly nothing to do, report briefly what you checked.
 {{/noTask}}`;
 
-// ---------------------------------------------------------------------------
-// v0.1.7 — LIGHT_PROMPT_TEMPLATE
-// ---------------------------------------------------------------------------
-// Activated when the agent has a non-trivial AGENTS.md (the persona/bundle
-// took the wheel) and the user didn't override `adapterConfig.promptTemplate`.
-//
-// The default template above is opinionated: it always tells the agent to
-// list issues, check the backlog and process them. That's the right behaviour
-// for a generic heartbeat agent, but it actively HIJACKS agents whose
-// AGENTS.md is a focused instruction (read X, return Y, etc.) — the LLM ends
-// up obeying the heartbeat template instead of the operator's brief.
-//
-// The light template just sets identity + task pointer + a "no task" stub so
-// any persona-supplied instruction reads as the single source of truth.
-// ---------------------------------------------------------------------------
-const LIGHT_PROMPT_TEMPLATE = `Run context: {{runId}}
-Agent: {{agentName}} ({{agentId}}) — Company {{companyId}}
-Paperclip API: {{paperclipApiUrl}}
-
-{{#taskId}}
-Assigned task: {{taskId}} — {{taskTitle}}
-{{taskBody}}
-{{/taskId}}
-
-{{#noTask}}
-No specific task assigned this wake. Follow the instructions above (AGENTS.md).
-{{/noTask}}`;
-
-const LIGHT_TEMPLATE_PERSONA_THRESHOLD = 200;
-
-// v0.1.8/v0.1.9 — `${VAR_NAME}` substitution.
-//
-// Paperclip's Configuration tab "Environment Variables" row writes to
-// `adapterConfig.env[KEY] = { type: "plain" | "secret", value }`. The
-// plugin's Custom Provider form accepts `${SECRET}` references so 50
-// agents can share one entry — edit once, every agent picks up.
-//
-// Priority order:
-//   1. Agent-level env binding (adapterConfig.env) — set by aluno via UI
-//   2. process.env — set by Paperclip server compose or shell
-//   3. Unmatched → leave literal `${NAME}` so the failure is visible
-//      (rather than silently sending an empty Authorization header)
-//
-// v0.1.9 fix — previously only read process.env. The agent-level
-// envBindings live in config.env (typed Record<string, EnvBinding>),
-// NOT in the plugin process's environment. Paperclip injects those into
-// the Hermes SUBPROCESS env, but my plugin needs the value EARLIER, to
-// rewrite the Custom Provider API key field that feeds OPENAI_API_KEY.
-function resolveSecretRefs(
-  value: string,
-  config: Record<string, unknown>,
-): string {
-  const envBindings = config.env;
-  return value.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/gi, (match, name) => {
-    if (envBindings && typeof envBindings === "object") {
-      const binding = (envBindings as Record<string, unknown>)[name];
-      if (binding && typeof binding === "object") {
-        const v = (binding as { value?: unknown }).value;
-        if (typeof v === "string" && v.length > 0) return v;
-      }
-      if (typeof binding === "string" && binding.length > 0) return binding;
-    }
-    const fromProcess = process.env[name];
-    if (typeof fromProcess === "string" && fromProcess.length > 0) return fromProcess;
-    return match;
-  });
-}
-
-// v0.1.8 — Aluno picks how the prompt template is chosen:
-//   "auto"   (default, v0.1.12+) — `promptTemplate` field if set, else FULL.
-//                        v0.1.7-v0.1.11 auto-switched to LIGHT when the persona
-//                        was substantial; that quietly capped autonomous-issue
-//                        workflows (curl/list/comment/done) so v0.1.12 reverted.
-//   "light"           — force LIGHT_PROMPT_TEMPLATE regardless of bundle.
-//                        OPT-IN token saver: drops the workflow boilerplate
-//                        (~13k tokens/wake). Use when AGENTS.md fully describes
-//                        what the agent should do AND you don't need the agent
-//                        to autonomously list/comment/close issues via the
-//                        Paperclip API. Picking "light" trades autonomy for tokens.
-//   "full"            — force DEFAULT_PROMPT_TEMPLATE regardless of bundle.
-//                        Identical to "auto" today; kept as explicit opt-in
-//                        in case the auto behaviour changes in the future.
-//   "custom"          — use `config.promptTemplate` verbatim. Identical to
-//                        leaving heartbeatMode at "auto" with a non-empty
-//                        promptTemplate; kept as an explicit opt-in for clarity.
-function pickPromptTemplate(
-  config: Record<string, unknown>,
-  _persona: string,
-): string {
-  const userTemplate = cfgString(config.promptTemplate);
-  const mode = (cfgString(config.heartbeatTemplateMode) || "auto").toLowerCase();
-
-  // Explicit forced modes:
-  if (mode === "custom" && userTemplate) return userTemplate;
-  if (mode === "light") return LIGHT_PROMPT_TEMPLATE;
-  if (mode === "full") return DEFAULT_PROMPT_TEMPLATE;
-
-  // `auto` (or unrecognised): user-supplied template wins; otherwise FULL.
-  if (userTemplate) return userTemplate;
-  return DEFAULT_PROMPT_TEMPLATE;
-}
-
-// v0.1.8 — sessionResume tri-state replacing the legacy `persistSession`
-// boolean. "auto" preserves v0.1.7 behaviour (resume when last sessionId
-// is on file). "never" disables resume entirely. "prompt" is reserved for
-// a future "ask Felipe each wake" hook — for now it behaves like "auto".
+// sessionResume: "auto" resumes when a prior session id is on file, "never"
+// always starts fresh. Falls back to the legacy `persistSession` boolean.
 function shouldResumeSession(
   config: Record<string, unknown>,
   hasPrevSession: boolean,
@@ -464,7 +358,6 @@ function shouldResumeSession(
   const mode = (cfgString(config.sessionResume) || "").toLowerCase();
   if (mode === "never") return false;
   if (mode === "auto" || mode === "prompt") return hasPrevSession;
-  // Legacy boolean preserved for back-compat with agents created < v0.1.8.
   return cfgBoolean(config.persistSession) !== false && hasPrevSession;
 }
 
@@ -473,16 +366,35 @@ function buildPrompt(
   config: Record<string, unknown>,
 ): string {
   const persona = readBundleEntry(ctx, config);
-  const template = pickPromptTemplate(config, persona);
+  // Upstream behaviour: the operator's `promptTemplate` wins if set, otherwise
+  // the full Paperclip heartbeat workflow. (The opt-in LIGHT mode was removed —
+  // it diverged from upstream and added a bug surface without a reliable win.)
+  const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  // Paperclip delivers the wake context (task, comment, …) in `ctx.context`,
+  // NOT `ctx.config` (which is the adapterConfig). Merge both — context wins —
+  // so the {{#taskId}}/{{#commentId}} blocks actually fire on task/comment
+  // wakes. (Reading only ctx.config silently drops the task and comment, so the
+  // agent falls into the generic heartbeat and ignores what was asked.)
+  const wake = {
+    ...((ctx.config ?? {}) as Record<string, unknown>),
+    ...((ctx.context ?? {}) as Record<string, unknown>),
+  };
+  const issue = (wake.paperclipIssue ?? {}) as Record<string, unknown>;
+
+  const taskId = cfgString(wake.taskId) ?? cfgString(wake.issueId);
+  const taskTitle = cfgString(wake.taskTitle) || cfgString(issue.title) || "";
+  const taskBody = cfgString(wake.taskBody) || cfgString(issue.description) || "";
+  const commentId = cfgString(wake.commentId) || "";
+  const wakeReason = cfgString(wake.wakeReason) || "";
   const agentName = ctx.agent?.name || "Hermes Agent";
-  const companyName = cfgString(ctx.config?.companyName) || "";
-  const projectName = cfgString(ctx.config?.projectName) || "";
+  const companyName = cfgString(wake.companyName) || "";
+  const projectName = cfgString(wake.projectName) || "";
+
+  // Paperclip pre-builds a task-context string (issue + latest wake comment +
+  // "use as the current assignment"). Inject it verbatim so the agent actually
+  // sees the comment — the template alone only tells it to curl one.
+  const taskMarkdown = cfgString(wake.paperclipTaskMarkdown);
 
   let paperclipApiUrl =
     cfgString(config.paperclipApiUrl) ||
@@ -529,11 +441,10 @@ function buildPrompt(
 
   const renderedPrompt = renderTemplate(rendered, vars);
 
-  // PATCH #2 — prepend bundle entry (SOUL/AGENTS/HEARTBEAT/TOOLS, whichever
-  // Paperclip pinned). When no bundle exists, behaviour matches upstream.
-  // The bundle was already read at the top of this function to choose between
-  // the heartbeat-default and light templates — reuse it.
-  return persona ? `${persona}\n\n---\n\n${renderedPrompt}` : renderedPrompt;
+  // Assemble: persona bundle → Paperclip task/comment context → workflow.
+  return [persona, taskMarkdown, renderedPrompt]
+    .filter((s): s is string => Boolean(s && s.trim()))
+    .join("\n\n---\n\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -636,163 +547,31 @@ export async function execute(
   const config = (ctx.config ?? ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
 
   // ── Resolve configuration ──────────────────────────────────────────────
-  // v0.1.3 / Fix #1: respect explicit hermesCommand, otherwise auto-pick
-  // the wrapper at `/usr/local/bin/hermes-paperclip` (bento default) and
-  // fall back to plain `hermes` on PATH if the wrapper isn't installed.
   const hermesCmd = resolveHermesCommand(config);
 
-  // v0.1.4 — "Default" means: don't pass `-m` / `--provider` to the CLI at
-  // all. Let Hermes resolve the model + provider out of its own
-  // `~/.hermes/config.yaml`, which the bento install configures once
-  // (typically zai/glm-5.1 in this deployment). Falling back to
-  // `anthropic/claude-sonnet-4` like upstream does breaks zero-touch agents
-  // because the Hermes container has no Anthropic API key.
+  // `-m` is passed only when a model is pinned; otherwise Hermes resolves the
+  // model + provider from ~/.hermes/config.yaml.
   const model = cfgString(config.model);
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
 
-  // PATCH #3 — default toolsets `terminal,skills` so Paperclip-managed
-  // skill symlinks become `skill_view` tools at runtime without aluno
-  // having to configure anything in the UI.
+  // Pass `-t` only when toolsets are explicitly set; otherwise Hermes uses
+  // its own default set (terminal, skills, etc. are on by default).
   const toolsets =
     cfgString(config.toolsets) ||
-    cfgStringArray(config.enabledToolsets)?.join(",") ||
-    DEFAULT_TOOLSETS;
+    cfgStringArray(config.enabledToolsets)?.join(",");
 
   const extraArgs = cfgStringArray(config.extraArgs);
   const persistSession = cfgBoolean(config.persistSession) !== false;
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
 
-  // ── v0.1.8 NOTE on `thinkingEffort` (CreateConfigValues universal field) ─
-  // The Paperclip New Agent form exposes a "Thinking effort" field for ALL
-  // adapters (it's part of the universal CreateConfigValues type, not our
-  // schema). For the Hermes adapter it is COSMETIC: Hermes has no CLI flag
-  // and no env var for reasoning effort — the value lives only in
-  // `~/.hermes/config.yaml` under `agent.reasoning_effort` and is global
-  // to the Hermes daemon. The plugin DOES NOT and WILL NOT modify
-  // config.yaml (dual-owner risk; Felipe ruled it out explicitly). Aluno
-  // avançado who wants to change reasoning effort edits config.yaml
-  // directly and the next wake picks it up. Aluno leigo: the field has no
-  // effect; ignore it.
+  // "Model" and "Thinking effort" are universal Paperclip fields the plugin
+  // doesn't forward — both are owned by Hermes' config.yaml. `config.model` is
+  // only set when pinned explicitly via the API.
 
-  // ── v0.1.8 — Custom provider (OpenAI-compatible) ───────────────────────
-  // When the user picks `provider: "custom"` in the UI, the plugin treats it
-  // as a generic OpenAI-compatible endpoint. We pass `--provider openai-api`
-  // to Hermes and inject the user-supplied URL/key/headers via env vars so
-  // the openai-api provider routes to their custom endpoint.
-  //
-  // Why this design: 99% of "exotic" providers today (Together, Groq,
-  // Fireworks, Ollama, vLLM, OpenRouter, etc.) speak the OpenAI Chat
-  // Completions API. Aluno picks "Custom", fills 3 fields, plugin handles
-  // the routing — zero config.yaml edits required.
-  //
-  // Secret refs (`${VAR_NAME}`) in the API Key field are resolved against
-  // process.env at run time. Paperclip's Environment Variables row injects
-  // company-level secrets into the run env — so the API key never lives in
-  // adapterConfig in plaintext. Aluno creates one company secret, all
-  // agents reference it by `${NAME}`.
-  const explicitProviderConfig = cfgString(config.provider);
-  const customProviderEnv: Record<string, string> = {};
-  let customProviderModel: string | null = null;
-  let customProviderActive = false;
-  if (explicitProviderConfig === "custom") {
-    const baseUrl = resolveSecretRefs(
-      cfgString(config.customProviderBaseUrl) || "",
-      config,
-    );
-    const apiKey = resolveSecretRefs(
-      cfgString(config.customProviderApiKey) || "",
-      config,
-    );
-    customProviderModel = cfgString(config.customProviderModelOverride) || null;
-    // v0.1.10 — Hermes uses `OPENAI_BASE_URL` (not `OPENAI_API_BASE`) AND
-    // strips provider-related envs from the subprocess via a hard blocklist
-    // (see /opt/hermes/agent/.../local_env_blocklist tests). The escape hatch
-    // is the `_HERMES_FORCE_<NAME>` prefix: Hermes recognises it, drops the
-    // prefix, and injects `<NAME>` into the spawn env. We use both: normal
-    // names so older Hermes builds keep working, and the force-prefixed
-    // variants for current Hermes that gates them.
-    if (baseUrl) {
-      customProviderEnv.OPENAI_BASE_URL = baseUrl;
-      customProviderEnv._HERMES_FORCE_OPENAI_BASE_URL = baseUrl;
-    }
-    if (apiKey) {
-      customProviderEnv.OPENAI_API_KEY = apiKey;
-      customProviderEnv._HERMES_FORCE_OPENAI_API_KEY = apiKey;
-    }
-    // Extra headers JSON — merge each key as HEADER_<NAME> env var that
-    // Hermes openai-api provider picks up. Best-effort parse; broken JSON
-    // is ignored silently.
-    const headersJson = cfgString(config.customProviderHeaders);
-    if (headersJson) {
-      try {
-        const parsed = JSON.parse(headersJson);
-        if (parsed && typeof parsed === "object") {
-          for (const [k, v] of Object.entries(parsed)) {
-            if (typeof v === "string") {
-              customProviderEnv[
-                `OPENAI_EXTRA_HEADER_${k.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`
-              ] = resolveSecretRefs(v, config);
-            }
-          }
-        }
-      } catch (err) {
-        // Malformed JSON in the Custom Provider Extra Headers field is a
-        // common aluno mistake (missing comma, trailing comma, single quotes).
-        // We can't fail the wake — `headersJson` is optional — but a silent
-        // skip leaves the aluno wondering why their custom header isn't being
-        // sent. Surface the parse error so it shows up on the Run page.
-        const message = err instanceof Error ? err.message : String(err);
-        await ctx.onLog(
-          "stdout",
-          `[paperclip] WARN Custom Provider Extra headers JSON did not parse: ${message}. ` +
-            `Extra headers will NOT be sent on this wake.\n`,
-        );
-      }
-    }
-    customProviderActive = true;
-  }
-
-  // ── Resolve provider ───────────────────────────────────────────────────
-  // Only run the provider-resolution chain when we actually have a model
-  // override — otherwise we'd guess a provider for a model name the user
-  // never typed.
-  let resolvedProvider = "auto";
-  let resolvedFrom: string = "hermesDefault";
-  if (model) {
-    let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
-    const explicitProvider = cfgString(config.provider);
-    if (!explicitProvider) {
-      try {
-        detectedConfig = await detectModel();
-      } catch (err) {
-        // detectModel() reads ~/.hermes/config.yaml + auth.json to guess
-        // which provider the model name belongs to. Failing here just
-        // means we fall through to `auto` and let Hermes resolve. We log
-        // because if the user expects model-based provider inference to
-        // work, a silent fallback is a confusing debugging hole.
-        const message = err instanceof Error ? err.message : String(err);
-        await ctx.onLog(
-          "stdout",
-          `[paperclip] WARN provider auto-detection failed: ${message}. ` +
-            `Falling back to provider=auto. Pick a Provider explicitly in ` +
-            `the UI to override.\n`,
-        );
-      }
-    }
-    const resolved = resolveProvider({
-      explicitProvider,
-      detectedProvider: detectedConfig?.provider,
-      detectedModel: detectedConfig?.model,
-      model,
-    });
-    resolvedProvider = resolved.provider;
-    resolvedFrom = resolved.resolvedFrom;
-  }
-
-  // ── Build prompt (with bundle entry prepended via PATCH #2) ────────────
+  // ── Build prompt (bundle prepended) ────────────────────────────────────
   const prompt = buildPrompt(ctx, config);
 
   // ── Build command args ─────────────────────────────────────────────────
@@ -800,25 +579,8 @@ export async function execute(
   const args: string[] = ["chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 
-  // v0.1.4 — only pass `-m` and `--provider` when the user picked a model
-  // in the UI. Empty Model field == use whatever Hermes' own config.yaml
-  // resolves to.
-  // v0.1.8 — `provider: "custom"` short-circuits this: pass
-  // `--provider openai-api` and the Custom Model Override as `-m`. The
-  // OPENAI_API_BASE / OPENAI_API_KEY envs (set above) redirect Hermes's
-  // built-in openai-api adapter at the aluno's endpoint.
-  if (customProviderActive) {
-    args.push("--provider", "openai-api");
-    if (customProviderModel) args.push("-m", customProviderModel);
-  } else if (model) {
+  if (model) {
     args.push("-m", model);
-    if (resolvedProvider !== "auto") {
-      args.push("--provider", resolvedProvider);
-    }
-  } else if (explicitProviderConfig && explicitProviderConfig !== "auto") {
-    // Explicit non-custom provider, no model override → trust the provider
-    // entry in Hermes config.yaml to carry its own model default.
-    args.push("--provider", explicitProviderConfig);
   }
 
   if (toolsets) {
@@ -831,95 +593,63 @@ export async function execute(
 
   if (worktreeMode) args.push("-w");
   if (checkpoints) args.push("--checkpoints");
-  // v0.1.8 — accept either `debug` (new UI toggle) or `verbose` (legacy) for back-compat.
+  // Accept `debug` or legacy `verbose`.
   if (cfgBoolean(config.debug) === true || cfgBoolean(config.verbose) === true) {
     args.push("-v");
   }
 
   args.push("--source", "tool");
 
-  // v0.1.13 — `--yolo` is now an opt-out UI toggle (default true). Without
-  // it, Hermes in -q non-interactive mode auto-denies every shell call on
-  // TTY-prompt timeout, breaking the autonomous-issue workflow the default
-  // template assumes. Aluno avançado can disable it to align with upstream
-  // Hermes' conservative default; the run will then block at the first
-  // dangerous command.
-  if (cfgBoolean(config.skipApprovalPrompts) !== false) {
-    args.push("--yolo");
-  }
+  // `--yolo` bypasses approval prompts — the agent has no TTY, so without it
+  // Hermes auto-denies every shell call after a prompt timeout.
+  args.push("--yolo");
 
   const prevSessionId = cfgString(
     (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
   );
-  // v0.1.8 — sessionResume enum supersedes persistSession boolean.
   if (prevSessionId && shouldResumeSession(config, true)) {
     args.push("--resume", prevSessionId);
   } else if (persistSession && prevSessionId && !cfgString(config.sessionResume)) {
-    // Legacy back-compat: old agents (created < v0.1.8) only have
-    // `persistSession: true` — keep behaviour identical.
+    // Legacy agents only have persistSession: true.
     args.push("--resume", prevSessionId);
   }
 
   if (extraArgs?.length) {
-    args.push(...extraArgs);
+    args.push(...stripReasoningEffort(extraArgs));
   }
 
   // ── Build environment ──────────────────────────────────────────────────
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     ...buildPaperclipEnv(ctx.agent),
-    // v0.1.8 — Custom provider env injection. Must come AFTER the spread of
-    // process.env so we override any pre-existing OPENAI_* values that the
-    // host shell may have set for other purposes.
-    ...customProviderEnv,
   };
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
   if ((ctx as { authToken?: string }).authToken && !env.PAPERCLIP_API_KEY)
     env.PAPERCLIP_API_KEY = (ctx as { authToken: string }).authToken;
-  const taskId = cfgString(ctx.config?.taskId);
+  // Wake context (taskId) lives in ctx.context; fall back to ctx.config.
+  const taskId =
+    cfgString((ctx.context as Record<string, unknown> | undefined)?.taskId) ||
+    cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  // Paperclip persists adapterConfig.env as a map of "env bindings" — each
-  // value is wrapped in {type: "plain", value: "..."} for the strict-secret
-  // gate. Extract .value here for plain bindings; resolved secret_ref
-  // bindings arrive as plain strings already.
-  const userEnv = config.env;
-  if (userEnv && typeof userEnv === "object" && !Array.isArray(userEnv)) {
-    for (const [key, raw] of Object.entries(userEnv as Record<string, unknown>)) {
-      if (typeof raw === "string") {
-        env[key] = raw;
-      } else if (
-        raw &&
-        typeof raw === "object" &&
-        (raw as { type?: unknown }).type === "plain" &&
-        typeof (raw as { value?: unknown }).value === "string"
-      ) {
-        env[key] = (raw as { value: string }).value;
-      }
-    }
+  // Paperclip resolves env bindings (plain + secret_ref) into plain string
+  // values before the adapter runs, so config.env is a flat KEY=value map.
+  const userEnv = config.env as Record<string, string> | undefined;
+  if (userEnv && typeof userEnv === "object") {
+    Object.assign(env, userEnv);
   }
 
-  // ── Resolve working directory (v0.1.11 — Cut 4 from token audit) ──────
-  // Why this is non-trivial:
-  // Hermes auto-injects any `AGENTS.md` (and SOUL.md, .cursorrules, memory)
-  // it finds by walking up from the spawn CWD. Earlier builds let `cwd`
-  // default to `"."` (the Paperclip server's CWD = `/app`). `/app/AGENTS.md`
-  // is the Paperclip codebase contributor guide (Express, Drizzle, React)
-  // — irrelevant to every aluno agent, costing ~875 tokens per cold wake.
-  // See docs/token-baseline-analysis.md §9 for the measured numbers.
-  //
-  // Resolution order (first non-empty wins):
-  //   1. `config.cwd`               — explicit Configuration field
-  //   2. `ctx.config.workspaceDir`  — Paperclip-assigned project workspace
-  //   3. agent scratch workspace    — `<PAPERCLIP_HOME>/instances/<inst>/workspaces/<agentId>/`
-  //      Already created by Paperclip for the fallback workspace logged at
-  //      wake start (`[paperclip] Using fallback workspace …`). Free of any
-  //      inherited `AGENTS.md`, so Hermes's discovery walk finds nothing
-  //      to inject. The plugin still ships its own AGENTS.md via the
-  //      managed bundle path (`instructionsFilePath`), so the persona is
-  //      not lost — only the bogus injection.
-  //   4. `"."` last-resort (pre-v0.1.11 behaviour)
+  // ── Resolve working directory ──────────────────────────────────────────
+  // Hermes auto-injects any AGENTS.md/SOUL.md/memory it finds by walking up
+  // from the spawn CWD. Defaulting to "." (the server's /app) would pull in
+  // /app/AGENTS.md (the Paperclip contributor guide) on every wake. So we
+  // spawn in a per-agent scratch workspace that has no inherited AGENTS.md —
+  // the persona still arrives via the managed bundle. Resolution order:
+  //   1. config.cwd                — explicit Configuration field
+  //   2. ctx.config.workspaceDir   — Paperclip-assigned project workspace
+  //   3. <PAPERCLIP_HOME>/instances/<inst>/workspaces/<agentId>/  (scratch)
+  //   4. "."                       — last resort
   const explicitCwd =
     cfgString(config.cwd) || cfgString(ctx.config?.workspaceDir);
   let cwd: string;
@@ -941,41 +671,28 @@ export async function execute(
       cwd = ".";
     }
   }
-  // ensureAbsoluteDirectory may fail on race, perms, or non-absolute paths.
-  // We don't want to abort the wake (Hermes will still spawn against the
-  // closest existing parent and run), but we DO want the failure visible —
-  // a silent catch here hides "your token saving never landed because the
-  // scratch dir wasn't writable". Surface it on the Run page log.
+  // Best-effort — if this fails (race, perms), Hermes still spawns in the
+  // closest existing parent.
   try {
     await ensureAbsoluteDirectory(cwd);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await ctx.onLog(
-      "stdout",
-      `[paperclip] WARN could not ensure cwd ${cwd}: ${message}. ` +
-        `Hermes will spawn in the closest existing parent; the AGENTS.md ` +
-        `auto-injection saving may not apply this wake.\n`,
-    );
+  } catch {
+    // ignore
   }
 
   // ── Log start ──────────────────────────────────────────────────────────
   await ctx.onLog(
     "stdout",
-    `[hermes] Starting Hermes Agent (model=${model ?? "hermes default"}, provider=${resolvedProvider} [${resolvedFrom}], timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
+    `[hermes] Starting Hermes Agent (model=${model ?? "hermes default"}, timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
   );
   if (prevSessionId) {
     await ctx.onLog("stdout", `[hermes] Resuming session: ${prevSessionId}\n`);
   }
 
   // ── Execute ────────────────────────────────────────────────────────────
-  // v0.1.3 / Fix #2 (revised in v0.1.4): Hermes emits its quiet-mode
-  // `session_id: <id>` line on stderr, plus a handful of INFO/DEBUG status
-  // messages that aren't real errors. v0.1.3 tried matching `^session_id:`
-  // against the whole chunk after `trimEnd()`, which missed cases where the
-  // session line arrived prefixed by a leading newline or batched with
-  // other output. v0.1.4 splits the chunk line-by-line and drops every
-  // matching line individually, then forwards whatever's left (reclassified
-  // to stdout when only benign lines remain).
+  // Hermes writes its quiet-mode `session_id:` line plus benign INFO/DEBUG
+  // status to stderr, which Paperclip would render as errors. Split each
+  // stderr chunk line-by-line, drop the session_id meta, and reclassify the
+  // rest to stdout when only benign lines remain.
   const wrappedOnLog = async (stream: "stdout" | "stderr", chunk: string) => {
     if (stream !== "stderr") {
       return ctx.onLog(stream, chunk);
@@ -1037,7 +754,6 @@ export async function execute(
     exitCode: result.exitCode,
     signal: result.signal,
     timedOut: result.timedOut,
-    provider: resolvedProvider,
     model,
   };
 
@@ -1053,11 +769,8 @@ export async function execute(
     executionResult.costUsd = parsed.costUsd;
   }
 
-  // v0.1.3 / Fix #3: enrich usage + cost from the persisted Hermes session
-  // metadata. The CLI's quiet-mode output deliberately doesn't include
-  // tokens, but `hermes sessions export` reads them out of state.db.
-  // Authoritative numbers come from there — overwrite parseHermesOutput's
-  // optimistic guess when we have them.
+  // Quiet mode omits token counts, so read the authoritative usage/cost from
+  // the persisted session and overwrite parseHermesOutput's guess.
   if (parsed.sessionId) {
     try {
       const sessionMetrics = await fetchSessionUsage(hermesCmd, parsed.sessionId, env, cwd);
@@ -1067,19 +780,21 @@ export async function execute(
       if (sessionMetrics?.costUsd != null) {
         executionResult.costUsd = sessionMetrics.costUsd;
       }
-    } catch (err) {
-      // `hermes sessions export` is best-effort enrichment. If it fails
-      // the wake still succeeds — we just don't show authoritative token
-      // counts on the Run page. Log the reason so the operator can tell
-      // the difference between "this wake didn't use tokens" and "the
-      // plugin couldn't read them back from state.db".
-      const message = err instanceof Error ? err.message : String(err);
-      await ctx.onLog(
-        "stdout",
-        `[paperclip] WARN could not enrich session usage metrics for ` +
-          `${parsed.sessionId}: ${message}. Token counts on the Run page ` +
-          `may be incomplete; the wake itself succeeded.\n`,
-      );
+      // Recover the final answer from the session when Hermes printed nothing
+      // to stdout. Hermes' quiet mode (`-q … -Q`) does NOT reliably echo the
+      // agent's last message — depending on the agent's execution path the
+      // wake can "succeed" with a blank Run page because stdout only carried
+      // the `[hermes] Starting/Exit` lines. The message is always in state.db,
+      // which `hermes sessions export` already gave us above.
+      if (!parsed.response?.trim() && sessionMetrics?.responseText?.trim()) {
+        parsed.response = sessionMetrics.responseText;
+        // Replay the recovered text to stdout so the Run transcript shows it —
+        // it feeds the transcript stream just like a normal Hermes echo would.
+        // (Without this the summary is captured but the transcript is blank.)
+        await ctx.onLog("stdout", `${sessionMetrics.responseText}\n`);
+      }
+    } catch {
+      // Best-effort enrichment — the wake still succeeds without token counts.
     }
   }
 

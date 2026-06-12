@@ -1,25 +1,14 @@
 /**
- * Root entry — what Paperclip's external adapter plugin-loader calls.
- *
- * We REGISTER under the same type as the built-in hermes_local adapter so
- * Paperclip's registry treats us as an override:
- *
- *   [paperclip] External adapter "hermes_local" overrides built-in adapter
- *
- * Once registered, every wake routed to hermes_local goes through OUR
- * execute() — which prepends the Paperclip-managed AGENTS.md bundle,
- * defaults toolsets to "terminal,skills", and respects the symlinks
- * materialised by OUR syncSkills().
+ * Root entry for Paperclip's external adapter plugin-loader. Registers under
+ * the built-in `hermes_local` type so Paperclip treats this as the override.
  */
 
 import {
   execute,
   testEnvironment,
-  detectModel,
   sessionCodec,
   listSkills,
   syncSkills,
-  listModels,
 } from "./server/index.js";
 
 import { getConfigSchema } from "./ui/build-config.js";
@@ -33,31 +22,42 @@ export const type = ADAPTER_TYPE;
 export const label = ADAPTER_LABEL;
 export const category = "local" as const;
 
-/**
- * Models list — always empty at build time. The combobox is populated at
- * runtime by `listModels()` (server/index.ts), which inspects Hermes'
- * actual config + credential pool on disk. Hardcoding would force every
- * install to ship Felipe-specific provider names.
- */
+// Empty model list (no listModels/detectModel): model selection is owned by
+// Hermes' config.yaml, so the universal Model field stays uncurated.
 export const models: never[] = [];
 
-export const agentConfigurationDoc = {
-  summary:
-    "Plugin override do adapter built-in hermes_local. Adiciona Instructions tab, default toolsets=terminal,skills, e materialização real de skills selecionadas como symlinks no ~/.hermes/skills/.",
-  steps: [
-    "O plugin está registrado automaticamente quando aparece em /paperclip/adapter-plugins.json.",
-    "Criar agent Hermes Agent na UI Paperclip.",
-    "Selecionar skills + editar SOUL.md/AGENTS.md tudo pela UI — sem tocar arquivos.",
-    "Wake heartbeat — bundle entry vira prefixo do system prompt, skills materializam em ~/.hermes/skills/.",
-  ],
-};
+export const agentConfigurationDoc = `# Hermes Agent (local)
 
-/**
- * Paperclip plugin-loader contract — must export createServerAdapter()
- * returning a ServerAdapterModule. Capabilities here are what Patch #1
- * in paperclip-hermes-patch-bundle.md added by hand to the core
- * registry.js — embedding them in the plugin module means no bind mount.
- */
+Drop-in override of the built-in \`hermes_local\` adapter. Spawns Hermes
+(\`hermes chat\`) with the Paperclip-managed instruction bundle prepended and the
+selected skills materialized as symlinks under \`~/.hermes/skills/\`.
+
+Model, provider and reasoning effort are owned by Hermes (\`~/.hermes/config.yaml\`),
+not Paperclip — the universal Model / Thinking effort fields are ignored.
+
+## Instructions
+
+Edit the agent's persona in the Instructions tab. The bundle is read in order and
+prepended to every wake's prompt: SOUL.md -> AGENTS.md -> HEARTBEAT.md -> TOOLS.md.
+
+## Skills
+
+Select skills in the Skills tab. They are symlinked into \`~/.hermes/skills/\`
+before each run so Hermes' \`skills\` toolset can load them.
+
+## Configuration fields
+
+- sessionResume ("auto" | "never"): resume the previous Hermes session, or start
+  fresh every wake. Default "auto".
+- debug (boolean): pass \`-v\` to Hermes for verbose output. Default off.
+- command (string, optional): path to the hermes binary. Defaults to
+  \`/opt/hermes/bin/hermes\` (override via PAPERCLIP_HERMES_CLI).
+- maxTurnsPerRun (number, optional): cap on agent tool-calling iterations.
+- extraArgs (string, optional): extra \`hermes chat\` CLI arguments.
+- cwd (string, optional): working directory for the run.
+`;
+
+/** Plugin-loader contract — returns the ServerAdapterModule Paperclip registers. */
 export function createServerAdapter() {
   return {
     type,
@@ -68,33 +68,20 @@ export function createServerAdapter() {
     sessionCodec,
     listSkills,
     syncSkills,
-    detectModel,
-    // listModels is called by Paperclip when the Model combobox opens. It
-    // reads ~/.hermes/config.yaml and ~/.hermes/auth.json on disk and emits
-    // ONLY the models/providers that Hermes is actually configured with —
-    // zero hardcoded names.
-    listModels,
     models,
     agentConfigurationDoc,
-    // v0.1.7 — Paperclip's `/api/adapters/<type>/config-schema` route calls
-    // `adapter.getConfigSchema()` (a function, NOT an object property called
-    // `agentConfigurationSchema` — that name was a red herring).
-    // See `/app/server/dist/routes/adapters.js:498`.
+    // Drives the Configuration tab via `GET /api/adapters/<type>/config-schema`.
     getConfigSchema,
 
-    // PATCH #1 (now embedded as plugin capability)
-    // Tells Paperclip we accept a managed bundle. The server then injects
-    // the resolved absolute path into adapterConfig.instructionsFilePath
-    // at runtime, and our execute() reads it via readBundleEntry() and
-    // prepends as system message.
+    // Accept the Paperclip-managed instruction bundle; the server injects its
+    // path into adapterConfig.instructionsFilePath, which execute() reads.
     supportsInstructionsBundle: true,
     instructionsPathKey: "instructionsFilePath",
 
-    // hermes_local upstream advertises:
     supportsLocalAgentJwt: true,
     requiresMaterializedRuntimeSkills: false,
   };
 }
 
 // Direct re-exports for any code path that imports specific symbols.
-export { execute, testEnvironment, detectModel, listSkills, syncSkills, sessionCodec };
+export { execute, testEnvironment, listSkills, syncSkills, sessionCodec };
