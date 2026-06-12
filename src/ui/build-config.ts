@@ -202,13 +202,13 @@ export async function getConfigSchema() {
         type: "select" as const,
         default: "auto",
         options: [
-          { value: "auto", label: "Auto (smart pick from AGENTS.md)" },
-          { value: "light", label: "Light (persona drives)" },
+          { value: "auto", label: "Auto (Full Paperclip workflow)" },
+          { value: "light", label: "Light (persona drives, no API workflow)" },
           { value: "full", label: "Full (Paperclip workflow)" },
           { value: "custom", label: "Custom (use Prompt template field)" },
         ],
         hint:
-          "How the plugin chooses the system prompt template. Auto = light template when AGENTS.md has substantive content (>200 chars), otherwise the full Paperclip heartbeat. Force 'Light' to skip issue listing even with empty AGENTS.md. Force 'Full' to inject the workflow even when AGENTS.md is rich. 'Custom' uses the Prompt template field verbatim.",
+          "How the plugin chooses the system prompt template. Auto = Full unless the Prompt template field is set. Light strips the Paperclip API workflow boilerplate (issue listing, comment, close) — the agent then relies purely on AGENTS.md to know what to do, saving ~13k input tokens per wake at the cost of autonomous issue handling. Full always injects the workflow. Custom uses the Prompt template field verbatim. v0.1.7-v0.1.11 had an auto-switch to Light when AGENTS.md was substantive; v0.1.12 reverted that because it silently capped agent autonomy.",
       },
       {
         key: "promptTemplate",

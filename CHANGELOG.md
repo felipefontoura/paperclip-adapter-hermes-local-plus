@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.14] - 2026-06-12
+
+### Fixed
+
+- Stale UI labels / hint for `heartbeatTemplateMode`. The "Auto (smart pick from AGENTS.md)" option was describing the v0.1.7-v0.1.11 behaviour that v0.1.12 reverted — Auto now always picks Full unless an explicit Prompt template is set. Updated the option labels and the hint accordingly so the dropdown matches actual runtime behaviour.
+
 ## [0.1.13] - 2026-06-12
 
 ### Changed
