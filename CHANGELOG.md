@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.13] - 2026-06-12
+
+### Changed
+
+- **`syncHermesSkills()` no longer tears down "stale" symlinks at wake time.** `~/.hermes/skills/` is shared across every agent in the same container, so the per-agent cleanup loop was deleting symlinks that other agents in the company still wanted — and re-creating them on the next wake. Net effect: wasted I/O on every heartbeat and an oscillating skills dir. The current agent always sees its desired symlinks (still created above), so removing the cleanup never breaks a run. Orphan symlinks belong to a delete-time hook or a separate `hermes skills prune` command, not the per-wake sync.
+- **`--yolo` is now an opt-out toggle.** New Configuration field `skipApprovalPrompts` (default `true`) controls whether the plugin passes `--yolo` to `hermes chat`. Upstream Nous never passed it; our fork has been hardcoding it since v0.1.0 because Hermes in `-q` (non-interactive) mode auto-DENIES every shell command after a TTY-prompt timeout — without `--yolo` the autonomous-issue workflow (`curl` to list/comment/close issues) blocks at the first call. Default `true` preserves the working autonomous behaviour; turn off to align with upstream's conservative posture, with the documented consequence that wakes will hang on shell calls.
+
 ## [0.1.12] - 2026-06-12
 
 ### Changed

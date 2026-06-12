@@ -845,7 +845,16 @@ export async function execute(
   }
 
   args.push("--source", "tool");
-  args.push("--yolo");
+
+  // v0.1.13 — `--yolo` is now an opt-out UI toggle (default true). Without
+  // it, Hermes in -q non-interactive mode auto-denies every shell call on
+  // TTY-prompt timeout, breaking the autonomous-issue workflow the default
+  // template assumes. Aluno avançado can disable it to align with upstream
+  // Hermes' conservative default; the run will then block at the first
+  // dangerous command.
+  if (cfgBoolean(config.skipApprovalPrompts) !== false) {
+    args.push("--yolo");
+  }
 
   const prevSessionId = cfgString(
     (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,

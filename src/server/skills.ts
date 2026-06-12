@@ -445,38 +445,20 @@ export async function syncHermesSkills(
     }
   }
 
-  // 2) Tear down symlinks for skills the user just unselected. Only remove
-  //    symlinks whose target matches one of our managed sources — never
-  //    touch unrelated entries (Hermes-native skills, hand-crafted dirs).
-  try {
-    const installed = await fs.readdir(skillsHome, { withFileTypes: true });
-    for (const entry of installed) {
-      if (!entry.isSymbolicLink()) continue;
-      const available = availableByHermesName.get(entry.name);
-      if (!available) continue;
-      if (desiredSet.has(available.key)) continue;
-      const target = path.join(skillsHome, entry.name);
-      try {
-        const current = await fs.readlink(target);
-        const resolved = path.resolve(skillsHome, current);
-        // Match against BOTH the source dir and the runtime dir — either could
-        // be the path we previously installed, depending on which existed at
-        // sync time. Without this, we'd never tear down stale symlinks after
-        // an aluno toggles off a skill that we materialised in source-dir mode.
-        if (
-          resolved === available.source ||
-          resolved === pickSymlinkTarget(available.source)
-        ) {
-          await fs.unlink(target);
-        }
-      } catch {
-        // ignore
-      }
-    }
-  } catch {
-    // ignore
-  }
-
+  // v0.1.13 — REMOVED active cleanup of "stale" symlinks.
+  //
+  // ~/.hermes/skills/ is a SHARED directory across every agent in the same
+  // container. v0.1.5..v0.1.12 tore down any symlink whose `key` was not in
+  // THIS agent's desiredSet — but that's wrong: another agent in the same
+  // company may want that skill. The result was an oscillating skills dir
+  // (each wake re-created the agent's own symlinks, deleted everyone else's)
+  // and silent I/O thrash on every heartbeat.
+  //
+  // The agent currently waking always sees its desired symlinks (we created
+  // them above), so removing the cleanup never breaks the run path. Orphan
+  // entries do accumulate when a skill is unselected from every agent or an
+  // agent is deleted — that lifecycle belongs to a delete-time hook or a
+  // separate `hermes skills prune` admin command, not the wake-time sync.
   return buildHermesSkillSnapshot(config);
 }
 

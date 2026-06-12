@@ -248,6 +248,14 @@ export async function getConfigSchema() {
         hint:
           "When ON, passes -v to Hermes for verbose stdout/stderr. Useful when wakes fail silently. The plugin still filters known-noisy lines so the Run page stays readable; you'll see tool I/O and reasoning summaries you wouldn't see normally.",
       },
+      {
+        key: "skipApprovalPrompts",
+        label: "Skip approval prompts (--yolo)",
+        type: "toggle" as const,
+        default: true,
+        hint:
+          "When ON (default), passes --yolo so the agent can run any shell command (curl, bash, file ops, etc.) without confirmation. Required for autonomous wakes: in non-interactive mode Hermes auto-DENIES every command after a TTY-prompt timeout, so the agent can't update issues, list backlogs, or post comments. Turn OFF only if you want Hermes' default conservative posture and accept that wakes will block on every shell call.",
+      },
     ],
   };
 }
