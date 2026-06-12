@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.12] - 2026-06-12
+
+### Changed
+
+- **`auto` mode no longer downgrades to LIGHT.** v0.1.7-v0.1.11 silently swapped the heartbeat template for a 7-line stub when `AGENTS.md > 200 chars`, intending to be a "token-saver for focused-persona agents". The side effect was that autonomous-issue workflows (list assigned, comment, mark done, parent notification — the whole point of the Nous Research default template) were stripped from every wake. **LIGHT is now strictly opt-in via `heartbeatTemplateMode: "light"`**. Default is FULL.
+- `readBundleEntry()` now reads the four canonical files instead of `AGENTS.md` only. Concatenation order: **SOUL.md → AGENTS.md → HEARTBEAT.md → TOOLS.md**, separated by `---`. Each file is prefixed with a `# <FILENAME>` heading so the LLM sees the hierarchy. Markdown headings inside each file are demoted one level (`# X` → `## X`, up to h5) to protect the outer hierarchy when authors write natural `# Something` lines.
+
+### Why
+
+This release reverts the auto-LIGHT regression that capped agent autonomy. The token-saver intent was valid; the implicit auto-switch wasn't. Operators who want LIGHT now pick it explicitly and accept the autonomy trade-off documented on the `heartbeatTemplateMode` field.
+
 ## [0.1.11] - 2026-06-11
 
 ### Added
@@ -59,3 +70,4 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [0.1.0 - 0.1.4]
 
 Initial scaffold and early iterations. See git history.
+</content>

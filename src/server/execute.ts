@@ -2,9 +2,10 @@
  * Server-side execution — fork of hermes-paperclip-adapter@0.3.0 with:
  *
  *  - Patch #2: readBundleEntry() + buildPrompt prepends the agent bundle
- *    (AGENTS.md / SOUL.md / etc.) before the rendered template, so Hermes
- *    sees the Paperclip-managed identity. Upstream ignored the bundle
- *    even when Paperclip injected `instructionsFilePath`.
+ *    (SOUL.md + AGENTS.md + HEARTBEAT.md + TOOLS.md from v0.1.12;
+ *    AGENTS.md only on v0.1.0-v0.1.11) before the rendered template, so
+ *    Hermes sees the Paperclip-managed identity. Upstream ignored the
+ *    bundle even when Paperclip injected `instructionsFilePath`.
  *
  *  - Patch #3: default toolsets become "terminal,skills" when the agent
  *    leaves the field blank, so Hermes auto-exposes `skills_list` /
@@ -222,41 +223,76 @@ async function fetchSessionUsage(
 // no-op and the original prompt template is used unchanged.
 // ---------------------------------------------------------------------------
 
+// v0.1.12 — read ALL four canonical instruction files (SOUL, AGENTS,
+// HEARTBEAT, TOOLS) and concatenate them in semantic order:
+//
+//   SOUL.md       — who the agent is (identity, values, voice)
+//   AGENTS.md     — what the agent does (domain, delegation, peers)
+//   HEARTBEAT.md  — how the agent runs each wake (workflow)
+//   TOOLS.md      — what the agent can call (tool inventory + recipes)
+//
+// Each file is prefixed with a `# <FILENAME>` header so the LLM sees the
+// hierarchy. Markdown headings INSIDE the file content are bumped one
+// level (`# X` → `## X`, `## Y` → `### Y`, etc., up to h5→h6) so authors
+// can write natural `# Something` lines without breaking the outer
+// hierarchy. Files are separated by `---` for clear delimitation.
+//
+// The `instructionsFilePath` server hint (set when
+// supportsInstructionsBundle: true) is still honoured as the canonical
+// pointer to the SOUL.md entry — we use its directory to locate the
+// sibling files. Falls back to the default Paperclip bundle path layout.
+const BUNDLE_ORDER = ["SOUL.md", "AGENTS.md", "HEARTBEAT.md", "TOOLS.md"];
+
+function bumpMarkdownHeadings(content: string): string {
+  // Demote h1..h5 by one level. h6 stays (already deepest). Only matches
+  // line-leading hashes followed by a space — fenced code blocks and inline
+  // `#tag` references are untouched.
+  return content.replace(/^(#{1,5}) /gm, "$1# ");
+}
+
 function readBundleEntry(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
 ): string {
   try {
-    // 1) Explicit absolute path wins — this is what the Paperclip server
-    //    injects at runtime when supportsInstructionsBundle is true on the
-    //    registered adapter (we declare it in src/index.ts).
+    // Locate the instructions/ directory:
+    //   1. From the server-injected `instructionsFilePath` (canonical, set
+    //      when supportsInstructionsBundle: true on our registry entry).
+    //   2. Or compose from PAPERCLIP_HOME + instance + company + agent ID.
+    let instructionsDir = "";
     const explicit = cfgString(config?.instructionsFilePath);
     if (explicit && path.isAbsolute(explicit) && fs.existsSync(explicit)) {
-      return fs.readFileSync(explicit, "utf8");
+      instructionsDir = path.dirname(explicit);
+    } else {
+      const home = process.env.PAPERCLIP_HOME || "/paperclip";
+      const instance = process.env.PAPERCLIP_INSTANCE_ID || "production";
+      const cid = (ctx.agent as { companyId?: string } | undefined)?.companyId;
+      const aid = ctx.agent?.id;
+      if (!cid || !aid) return "";
+      instructionsDir = path.join(
+        home,
+        "instances",
+        instance,
+        "companies",
+        cid,
+        "agents",
+        aid,
+        "instructions",
+      );
     }
 
-    // 2) Fall back to the managed bundle default location, in case the
-    //    server-injected path is missing on an older Paperclip build.
-    const home = process.env.PAPERCLIP_HOME || "/paperclip";
-    const instance = process.env.PAPERCLIP_INSTANCE_ID || "production";
-    const entry = cfgString(config?.instructionsEntryFile) || "AGENTS.md";
-    const cid = (ctx.agent as { companyId?: string } | undefined)?.companyId;
-    const aid = ctx.agent?.id;
-    if (!cid || !aid) return "";
+    if (!fs.existsSync(instructionsDir)) return "";
 
-    const full = path.join(
-      home,
-      "instances",
-      instance,
-      "companies",
-      cid,
-      "agents",
-      aid,
-      "instructions",
-      entry,
-    );
-    if (!fs.existsSync(full)) return "";
-    return fs.readFileSync(full, "utf8");
+    const sections: string[] = [];
+    for (const fileName of BUNDLE_ORDER) {
+      const full = path.join(instructionsDir, fileName);
+      if (!fs.existsSync(full)) continue;
+      const raw = fs.readFileSync(full, "utf8").trim();
+      if (!raw) continue;
+      sections.push(`# ${fileName}\n\n${bumpMarkdownHeadings(raw)}`);
+    }
+
+    return sections.join("\n\n---\n\n");
   } catch {
     return "";
   }
@@ -392,21 +428,25 @@ function resolveSecretRefs(
 }
 
 // v0.1.8 — Aluno picks how the prompt template is chosen:
-//   "auto"   (default) — auto-detect: AGENTS.md substantive → light,
-//                        otherwise → default heartbeat. Mirrors v0.1.7.
+//   "auto"   (default, v0.1.12+) — `promptTemplate` field if set, else FULL.
+//                        v0.1.7-v0.1.11 auto-switched to LIGHT when the persona
+//                        was substantial; that quietly capped autonomous-issue
+//                        workflows (curl/list/comment/done) so v0.1.12 reverted.
 //   "light"           — force LIGHT_PROMPT_TEMPLATE regardless of bundle.
-//                        Use when AGENTS.md is short but you still want
-//                        zero heartbeat boilerplate.
+//                        OPT-IN token saver: drops the workflow boilerplate
+//                        (~13k tokens/wake). Use when AGENTS.md fully describes
+//                        what the agent should do AND you don't need the agent
+//                        to autonomously list/comment/close issues via the
+//                        Paperclip API. Picking "light" trades autonomy for tokens.
 //   "full"            — force DEFAULT_PROMPT_TEMPLATE regardless of bundle.
-//                        Use when you want the full Paperclip workflow
-//                        injected (issue listing, comment posting, etc.).
-//   "custom"          — use `config.promptTemplate` verbatim. Identical
-//                        to leaving heartbeatMode at "auto" with a non-
-//                        empty promptTemplate — kept as an explicit
-//                        opt-in for clarity.
+//                        Identical to "auto" today; kept as explicit opt-in
+//                        in case the auto behaviour changes in the future.
+//   "custom"          — use `config.promptTemplate` verbatim. Identical to
+//                        leaving heartbeatMode at "auto" with a non-empty
+//                        promptTemplate; kept as an explicit opt-in for clarity.
 function pickPromptTemplate(
   config: Record<string, unknown>,
-  persona: string,
+  _persona: string,
 ): string {
   const userTemplate = cfgString(config.promptTemplate);
   const mode = (cfgString(config.heartbeatTemplateMode) || "auto").toLowerCase();
@@ -416,14 +456,8 @@ function pickPromptTemplate(
   if (mode === "light") return LIGHT_PROMPT_TEMPLATE;
   if (mode === "full") return DEFAULT_PROMPT_TEMPLATE;
 
-  // `auto` (or unrecognised) — keep v0.1.7 priority:
-  //   1) `promptTemplate` field set → use that
-  //   2) AGENTS.md > threshold → LIGHT
-  //   3) otherwise → DEFAULT
+  // `auto` (or unrecognised): user-supplied template wins; otherwise FULL.
   if (userTemplate) return userTemplate;
-  if (persona.trim().length >= LIGHT_TEMPLATE_PERSONA_THRESHOLD) {
-    return LIGHT_PROMPT_TEMPLATE;
-  }
   return DEFAULT_PROMPT_TEMPLATE;
 }
 

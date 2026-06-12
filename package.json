@@ -1,6 +1,6 @@
 {
   "name": "@felipefontoura/paperclip-adapter-hermes-local-plus",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Paperclip external adapter \u2014 overrides the built-in hermes_local adapter with Instructions tab support, default toolsets, and Paperclip-managed skill symlinks. Plug-and-play replacement for hermes-paperclip-adapter (Nous Research) on a managed Paperclip + Hermes deployment.",
   "license": "MIT",
   "type": "module",
