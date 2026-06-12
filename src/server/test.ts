@@ -14,8 +14,7 @@ import type {
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { HERMES_CLI, DEFAULT_MODEL, ADAPTER_TYPE, VALID_PROVIDERS } from "../shared/constants.js";
-import { detectModel, resolveProvider, inferProviderFromModel } from "./detect-model.js";
+import { HERMES_CLI, ADAPTER_TYPE } from "../shared/constants.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -176,66 +175,6 @@ function checkApiKeys(
   };
 }
 
-/**
- * Check provider/model consistency.
- * Warns if the configured provider might be wrong for the model.
- */
-async function checkProviderConsistency(
-  config: Record<string, unknown>,
-): Promise<AdapterEnvironmentCheck | null> {
-  const model = asString(config.model);
-  if (!model) return null;
-
-  const explicitProvider = asString(config.provider);
-
-  // Try to detect from Hermes config
-  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
-  try {
-    detectedConfig = await detectModel();
-  } catch {
-    // Non-fatal
-  }
-
-  const { provider: resolved, resolvedFrom } = resolveProvider({
-    explicitProvider,
-    detectedProvider: detectedConfig?.provider,
-    detectedModel: detectedConfig?.model,
-    model,
-  });
-
-  // If provider was explicitly set but doesn't match what Hermes config says,
-  // that's worth flagging.
-  if (explicitProvider && detectedConfig?.provider && explicitProvider !== detectedConfig.provider) {
-    return {
-      level: "warn",
-      message: `Provider mismatch: adapterConfig has "${explicitProvider}" but ~/.hermes/config.yaml has "${detectedConfig.provider}". Using adapterConfig value.`,
-      hint: `Model "${model}" may not work correctly with provider "${explicitProvider}". Consider aligning with your Hermes config or removing the explicit provider to use auto-detection.`,
-      code: "hermes_provider_mismatch",
-    };
-  }
-
-  // If provider was auto-detected (not explicitly set), log what was resolved
-  if (!explicitProvider && resolvedFrom !== "auto") {
-    return {
-      level: "info",
-      message: `Provider auto-detected as "${resolved}" (from ${resolvedFrom}) for model "${model}"`,
-      code: "hermes_provider_detected",
-    };
-  }
-
-  // If we couldn't resolve any provider, warn
-  if (resolvedFrom === "auto" && !explicitProvider) {
-    return {
-      level: "warn",
-      message: `Could not determine provider for model "${model}" — will use Hermes auto-detection`,
-      hint: "Set an explicit provider in the agent config or ensure ~/.hermes/config.yaml has a matching provider for this model.",
-      code: "hermes_provider_unknown",
-    };
-  }
-
-  return null;
-}
-
 // ---------------------------------------------------------------------------
 // Main test
 // ---------------------------------------------------------------------------
@@ -281,10 +220,6 @@ export async function testEnvironment(
   // 5. API keys (check config.env — server resolves secrets before calling us)
   const apiKeyCheck = checkApiKeys(config);
   if (apiKeyCheck) checks.push(apiKeyCheck);
-
-  // 6. Provider/model consistency
-  const providerCheck = await checkProviderConsistency(config);
-  if (providerCheck) checks.push(providerCheck);
 
   // Determine overall status
   const hasErrors = checks.some((c) => c.level === "error");

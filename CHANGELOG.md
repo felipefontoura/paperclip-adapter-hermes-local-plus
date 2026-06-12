@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.16] - 2026-06-12
+
+### Fixed
+
+- **Comment/task wakes now reach the agent.** The plugin read the wake context (`taskId`, `commentId`, the comment body) from `ctx.config`, but Paperclip delivers it in `ctx.context` — so comment-triggered runs fell into the generic "no task" heartbeat and ignored the comment. `buildPrompt()` now reads the wake context from `ctx.context` (falling back to `ctx.config`) and injects Paperclip's `paperclipTaskMarkdown` (issue + latest comment + "use as the current assignment") into the prompt. Bug shared with upstream.
+- **Blank Run output when Hermes' quiet mode doesn't echo.** `hermes chat -q … -Q` does not reliably print the agent's final message to stdout. The plugin now recovers it from `hermes sessions export` (already called for usage) and replays it to the transcript stream, so the Run page shows the response instead of going blank. Bug shared with upstream, which has no recovery at all.
+- **`--reasoning-effort` no longer breaks wakes.** `hermes chat` has no such flag (its argparse rejects unknown arguments), so the value the universal "Thinking effort" field injected could fail the run. The plugin stops emitting it and strips it from any agent that still carries it in `extraArgs`.
+
+### Changed
+
+- **Model, provider and reasoning effort are delegated to Hermes.** The universal "Model" / "Thinking effort" fields are no longer forwarded; Hermes resolves them from `~/.hermes/config.yaml`.
+- **Toolsets default removed.** When the field is blank the plugin no longer passes `-t`; Hermes uses its own default set (which already enables `terminal`, `skills`, etc., so `curl` and skill loading still work).
+- Converged several behaviours back to upstream: `--yolo` is always passed (no toggle), env bindings are forwarded with `Object.assign` (Paperclip resolves them to plain strings before the adapter runs), `agentConfigurationDoc` is a markdown string instead of an object (it was being served as raw JSON), and best-effort failures (cwd, session-usage) are silent again.
+
+### Removed
+
+- The **Provider** and **Custom Provider** (Base URL / API Key / Model / Extra headers) configuration fields, `listProviders()`, `detect-model.ts` (provider routing/inference), and `listModels()` — model/provider selection lives in Hermes.
+- The **LIGHT** heartbeat template and `heartbeatTemplateMode` field, and the **Prompt template** UI field (the upstream `promptTemplate` runtime plumbing stays).
+- The `Toolsets` and `Skip approval prompts (--yolo)` configuration fields.
+- The `js-yaml` dependency and dead constants (`VALID_PROVIDERS`, `MODEL_PREFIX_PROVIDER_HINTS`, `DEFAULT_MODEL`, `DEFAULT_TOOLSETS`, duplicate regexes).
+
+## [0.1.15] - 2026-06-12
+
+### Changed
+
+- Default `Command` now points at `/opt/hermes/bin/hermes` (the bento cross-stack mount target) with a `PAPERCLIP_HERMES_CLI` env override, replacing the dead `/usr/local/bin/hermes-paperclip` wrapper. `testEnvironment` and `execute` resolve the same binary, so a green "Test" means the spawn will work. Removed the `HERMES_CLI_FALLBACK` / `canExecute()` probing.
+
 ## [0.1.14] - 2026-06-12
 
 ### Fixed
