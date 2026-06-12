@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.17] - 2026-06-12
+
+### Fixed
+
+- **Run page no longer shows `unknown/unknown` for the model/provider.** Since the plugin delegates model/provider selection to Hermes, it left both unset and Paperclip rendered "unknown/unknown". `fetchSessionUsage()` now also reads `model` and `billing_provider` from the session export (already fetched for usage) and sets `executionResult.model` / `executionResult.provider`, so the badge shows what Hermes actually used (e.g. `zai-coding-plan/glm-5.1`). Falls back to unset when the export doesn't carry them.
+
 ## [0.1.16] - 2026-06-12
 
 ### Fixed
