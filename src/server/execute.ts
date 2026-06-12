@@ -52,7 +52,6 @@ import {
 
 import {
   HERMES_CLI_DEFAULT,
-  HERMES_CLI_FALLBACK,
   DEFAULT_TIMEOUT_SEC,
   DEFAULT_GRACE_SEC,
   DEFAULT_TOOLSETS,
@@ -80,31 +79,24 @@ function cfgStringArray(v: unknown): string[] | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// v0.1.3 / Fix #1 — Command field defaulting
+// v0.1.15 — Command field defaulting
 // ---------------------------------------------------------------------------
 // Priority order when picking which binary to spawn:
 //   1. Explicit `adapterConfig.hermesCommand` from the UI (whatever the
 //      user typed).
-//   2. The bento wrapper at `/usr/local/bin/hermes-paperclip` if present.
-//      That wrapper exports `HERMES_DOCKER_EXEC_AS_ROOT=1` and execs the
-//      real binary from the cross-stack `/opt/hermes/bin/hermes` mount.
-//   3. Plain `hermes` on PATH (legacy installs / dev).
+//   2. `process.env.PAPERCLIP_HERMES_CLI` from the Paperclip container's
+//      compose env — lets the operator (bento) own the path without
+//      republishing the plugin.
+//   3. `HERMES_CLI_DEFAULT` = `/opt/hermes/bin/hermes` — the bento
+//      cross-stack mount target. Absolute path, no PATH dependency.
 // ---------------------------------------------------------------------------
 
 function resolveHermesCommand(config: Record<string, unknown>): string {
-  const explicit = cfgString(config.hermesCommand);
-  if (explicit) return explicit;
-  if (canExecute(HERMES_CLI_DEFAULT)) return HERMES_CLI_DEFAULT;
-  return HERMES_CLI_FALLBACK;
-}
-
-function canExecute(p: string): boolean {
-  try {
-    fs.accessSync(p, fs.constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
+  return (
+    cfgString(config.hermesCommand) ||
+    process.env.PAPERCLIP_HERMES_CLI ||
+    HERMES_CLI_DEFAULT
+  );
 }
 
 // ---------------------------------------------------------------------------

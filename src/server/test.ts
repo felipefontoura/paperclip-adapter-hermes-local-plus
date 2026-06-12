@@ -244,7 +244,12 @@ export async function testEnvironment(
   ctx: AdapterEnvironmentTestContext,
 ): Promise<AdapterEnvironmentTestResult> {
   const config = (ctx.config ?? {}) as Record<string, unknown>;
-  const command = asString(config.hermesCommand) || HERMES_CLI;
+  // Mirror execute.ts:resolveHermesCommand priority so the "Test" button
+  // checks the same binary the wake will spawn.
+  const command =
+    asString(config.hermesCommand) ||
+    process.env.PAPERCLIP_HERMES_CLI ||
+    HERMES_CLI;
   const checks: AdapterEnvironmentCheck[] = [];
 
   // 1. CLI installed?

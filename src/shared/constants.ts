@@ -12,20 +12,18 @@ export const ADAPTER_LABEL = "Hermes Agent";
 
 /**
  * Default CLI command used when the Configuration tab's "Command" field is
- * left blank. We hardcode the absolute path of the wrapper that the bento
- * install ships at `/usr/local/bin/hermes-paperclip` (a 5-line bash that
- * exports `HERMES_DOCKER_EXEC_AS_ROOT=1` and execs `/opt/hermes/bin/hermes`),
- * so a leigo aluno can create a Hermes agent without typing anything.
+ * left blank. Points at the canonical mount target the bento install creates
+ * via `graft_external_volumes_to_service`: `hermes_hermes-bin` (named volume
+ * owned by the hermes stack) is grafted onto the paperclip service at
+ * `/opt/hermes`, so `/opt/hermes/bin/hermes` is the real binary at runtime.
  *
- * If the wrapper isn't present on this install, execute.ts falls back to
- * plain `hermes` on PATH at runtime.
+ * Absolute path — independent of `PATH`. If the mount isn't present, the
+ * spawn fails with a clear "ENOENT: /opt/hermes/bin/hermes" instead of a
+ * vague "command not found" that could mean PATH was unset.
  */
-export const HERMES_CLI_DEFAULT = "/usr/local/bin/hermes-paperclip";
+export const HERMES_CLI_DEFAULT = "/opt/hermes/bin/hermes";
 
-/** Last-resort fallback when the wrapper isn't on disk. */
-export const HERMES_CLI_FALLBACK = "hermes";
-
-/** Backwards-compat alias. */
+/** Backwards-compat alias kept for the test entrypoint. */
 export const HERMES_CLI = HERMES_CLI_DEFAULT;
 
 /** Default timeout for a single execution run (seconds). */
