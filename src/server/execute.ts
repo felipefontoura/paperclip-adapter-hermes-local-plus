@@ -93,6 +93,7 @@ interface HermesSessionMetadata {
   reasoning_tokens?: number;
   estimated_cost_usd?: number;
   actual_cost_usd?: number;
+  model?: string;
   billing_provider?: string;
   messages?: HermesSessionMessage[];
 }
@@ -101,6 +102,8 @@ type SessionFetchResult = {
   usage?: UsageSummary;
   costUsd?: number;
   responseText?: string;
+  model?: string;
+  provider?: string;
 };
 
 // Hermes message `content` is either a plain string or an array of parts
@@ -211,7 +214,13 @@ async function fetchSessionUsage(
               ? obj.actual_cost_usd
               : undefined;
         const responseText = lastAssistantText(obj.messages) || undefined;
-        settle({ usage: fullUsage, costUsd, responseText });
+        const model =
+          typeof obj.model === "string" && obj.model.trim() ? obj.model.trim() : undefined;
+        const provider =
+          typeof obj.billing_provider === "string" && obj.billing_provider.trim()
+            ? obj.billing_provider.trim()
+            : undefined;
+        settle({ usage: fullUsage, costUsd, responseText, model, provider });
       } catch {
         settle(null);
       }
@@ -779,6 +788,15 @@ export async function execute(
       }
       if (sessionMetrics?.costUsd != null) {
         executionResult.costUsd = sessionMetrics.costUsd;
+      }
+      // The plugin doesn't pick the model/provider (Hermes resolves them from
+      // config.yaml), so surface what Hermes actually used — otherwise the Run
+      // page badge shows "unknown/unknown".
+      if (sessionMetrics?.model) {
+        executionResult.model = sessionMetrics.model;
+      }
+      if (sessionMetrics?.provider) {
+        executionResult.provider = sessionMetrics.provider;
       }
       // Recover the final answer from the session when Hermes printed nothing
       // to stdout. Hermes' quiet mode (`-q … -Q`) does NOT reliably echo the
