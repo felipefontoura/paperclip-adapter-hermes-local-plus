@@ -26,6 +26,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - The `Toolsets` and `Skip approval prompts (--yolo)` configuration fields.
 - The `js-yaml` dependency and dead constants (`VALID_PROVIDERS`, `MODEL_PREFIX_PROVIDER_HINTS`, `DEFAULT_MODEL`, `DEFAULT_TOOLSETS`, duplicate regexes).
 
+### Docs
+
+- Rewrote the README for the current feature set and pruned stale docs: removed `docs/01-configuration-fields-reference.md` and `docs/02-why-wakes-cost-tokens.md` (documented removed fields / dev-sprint methodology) and the legacy `REPRODUCTION.md` (v0.1.2 wrapper install). Kept `docs/03` (CWD optimization) and `docs/04` (bento install).
+
 ## [0.1.15] - 2026-06-12
 
 ### Changed
