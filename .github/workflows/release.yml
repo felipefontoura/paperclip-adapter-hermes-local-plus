@@ -74,7 +74,17 @@ jobs:
             echo "registry=https://registry.npmjs.org/"
             echo "always-auth=true"
           } > "$HOME/.npmrc"
-          npm publish --access public
+          # Idempotent: skip publish if this version already lives on the
+          # registry. Lets us re-trigger the workflow (workflow_dispatch
+          # or tag retag) without 403s, while still rebuilding the GitHub
+          # Release tarball + notes below.
+          PKG="$(node -p "require('./package.json').name")"
+          PKG_VERSION="${{ steps.version.outputs.version }}"
+          if npm view "${PKG}@${PKG_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PKG}@${PKG_VERSION} already on npm — skipping publish."
+          else
+            npm publish --access public
+          fi
 
       - name: Pack tarball (artifact)
         run: pnpm pack
