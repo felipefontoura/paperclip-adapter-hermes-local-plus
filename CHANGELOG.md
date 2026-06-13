@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.18] - 2026-06-12
+
+### Fixed
+
+- **Resumed wakes no longer go blank.** When Hermes resumes a session it doesn't always re-print the `session_id:` line, so `parseHermesOutput()` returned an empty session id and the whole post-run enrichment (usage, cost, model/provider, and the response recovery) was skipped — leaving the Run page blank even though the session held the answer. The plugin now falls back to the session id it passed to `--resume` (`parsed.sessionId || prevSessionId`), so recovery, usage/cost, model/provider and session persistence all work on resumed wakes too.
+
 ## [0.1.17] - 2026-06-12
 
 ### Fixed
