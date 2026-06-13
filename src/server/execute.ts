@@ -754,8 +754,13 @@ export async function execute(
     "stdout",
     `[hermes] Exit code: ${result.exitCode ?? "null"}, timed out: ${result.timedOut}\n`,
   );
-  if (parsed.sessionId) {
-    await ctx.onLog("stdout", `[hermes] Session: ${parsed.sessionId}\n`);
+  // When Hermes resumes a session it may not re-print the `session_id:` line,
+  // so parseHermesOutput comes back empty even though the session exists. Fall
+  // back to the session we asked Hermes to --resume, so the enrichment below
+  // (usage/cost/model + response recovery) and session persistence still work.
+  const sessionId = parsed.sessionId || prevSessionId;
+  if (sessionId) {
+    await ctx.onLog("stdout", `[hermes] Session: ${sessionId}\n`);
   }
 
   // ── Build result ───────────────────────────────────────────────────────
@@ -780,9 +785,9 @@ export async function execute(
 
   // Quiet mode omits token counts, so read the authoritative usage/cost from
   // the persisted session and overwrite parseHermesOutput's guess.
-  if (parsed.sessionId) {
+  if (sessionId) {
     try {
-      const sessionMetrics = await fetchSessionUsage(hermesCmd, parsed.sessionId, env, cwd);
+      const sessionMetrics = await fetchSessionUsage(hermesCmd, sessionId, env, cwd);
       if (sessionMetrics?.usage) {
         executionResult.usage = sessionMetrics.usage;
       }
@@ -822,14 +827,14 @@ export async function execute(
 
   executionResult.resultJson = {
     result: parsed.response || "",
-    session_id: parsed.sessionId || null,
+    session_id: sessionId || null,
     usage: parsed.usage || null,
     cost_usd: parsed.costUsd ?? null,
   };
 
-  if (persistSession && parsed.sessionId) {
-    executionResult.sessionParams = { sessionId: parsed.sessionId };
-    executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+  if (persistSession && sessionId) {
+    executionResult.sessionParams = { sessionId };
+    executionResult.sessionDisplayId = sessionId.slice(0, 16);
   }
 
   return executionResult;
