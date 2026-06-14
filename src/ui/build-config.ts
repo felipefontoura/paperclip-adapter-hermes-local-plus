@@ -1,8 +1,8 @@
 /**
  * Build adapter configuration from UI form values — translates Paperclip's
  * CreateConfigValues into the stored adapterConfig. Model, provider and
- * reasoning effort are resolved by Hermes from ~/.hermes/config.yaml, so the
- * universal Model / Thinking effort fields are not forwarded.
+ * reasoning effort are owned by Hermes; the universal Paperclip fields are
+ * not forwarded.
  */
 
 import type { CreateConfigValues } from "@paperclipai/adapter-utils";
@@ -13,8 +13,6 @@ export function buildHermesConfig(
   v: CreateConfigValues,
 ): Record<string, unknown> {
   const ac: Record<string, unknown> = {};
-
-  // Model & provider come from Hermes config.yaml; not forwarded.
 
   // Execution limits.
   ac.timeoutSec = DEFAULT_TIMEOUT_SEC;
@@ -29,8 +27,6 @@ export function buildHermesConfig(
   if (v.cwd) ac.cwd = v.cwd;
   if (v.command) ac.hermesCommand = v.command;
   if (v.extraArgs) ac.extraArgs = v.extraArgs.split(/\s+/).filter(Boolean);
-
-  // Reasoning effort comes from Hermes config.yaml; not forwarded.
 
   if (v.promptTemplate) ac.promptTemplate = v.promptTemplate;
 
