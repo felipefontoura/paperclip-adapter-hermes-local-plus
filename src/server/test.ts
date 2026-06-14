@@ -14,13 +14,10 @@ import type {
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { HERMES_CLI, ADAPTER_TYPE } from "../shared/constants.js";
+import { ADAPTER_TYPE } from "../shared/constants.js";
+import { resolveHermesCommand } from "./execute.js";
 
 const execFileAsync = promisify(execFile);
-
-function asString(v: unknown): string | undefined {
-  return typeof v === "string" ? v : undefined;
-}
 
 // ---------------------------------------------------------------------------
 // Checks
@@ -110,25 +107,6 @@ async function checkPython(): Promise<AdapterEnvironmentCheck | null> {
   }
 }
 
-function checkModel(
-  config: Record<string, unknown>,
-): AdapterEnvironmentCheck | null {
-  const model = asString(config.model);
-  if (!model) {
-    return {
-      level: "info",
-      message: "No model specified — Hermes will use its configured default model",
-      hint: "Set a model explicitly in Paperclip only if you want to override your local Hermes configuration.",
-      code: "hermes_configured_default_model",
-    };
-  }
-  return {
-    level: "info",
-    message: `Model: ${model}`,
-    code: "hermes_model_configured",
-  };
-}
-
 function checkApiKeys(
   config: Record<string, unknown>,
 ): AdapterEnvironmentCheck | null {
@@ -183,12 +161,9 @@ export async function testEnvironment(
   ctx: AdapterEnvironmentTestContext,
 ): Promise<AdapterEnvironmentTestResult> {
   const config = (ctx.config ?? {}) as Record<string, unknown>;
-  // Mirror execute.ts:resolveHermesCommand priority so the "Test" button
-  // checks the same binary the wake will spawn.
-  const command =
-    asString(config.hermesCommand) ||
-    process.env.PAPERCLIP_HERMES_CLI ||
-    HERMES_CLI;
+  // Use the same resolver execute() does, so the "Test" button checks the
+  // exact binary the wake will spawn (no drift between the two).
+  const command = resolveHermesCommand(config);
   const checks: AdapterEnvironmentCheck[] = [];
 
   // 1. CLI installed?
@@ -213,11 +188,7 @@ export async function testEnvironment(
   const pythonCheck = await checkPython();
   if (pythonCheck) checks.push(pythonCheck);
 
-  // 4. Model config
-  const modelCheck = checkModel(config);
-  if (modelCheck) checks.push(modelCheck);
-
-  // 5. API keys (check config.env — server resolves secrets before calling us)
+  // 4. API keys (check config.env — server resolves secrets before calling us)
   const apiKeyCheck = checkApiKeys(config);
   if (apiKeyCheck) checks.push(apiKeyCheck);
 

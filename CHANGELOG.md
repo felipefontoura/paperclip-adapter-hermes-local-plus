@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.19] - 2026-06-14
+
+### Removed
+
+- **Dead model-selection code.** The plugin no longer reads `config.model` or forwards `-m` to `hermes chat`, and `testEnvironment` dropped its `checkModel` probe. Model selection is fully owned by Hermes (`~/.hermes/config.yaml`). The Run-page badge still shows the real model/provider — that's surfaced from the session export, not from a plugin-side selection.
+
+### Changed
+
+- **Single source of truth for the hermes binary.** `resolveHermesCommand` is now exported from `execute.ts` and reused by `test.ts`, so the "Test" button and the actual wake always resolve the exact same binary (UI `command` → `PAPERCLIP_HERMES_CLI` → `/opt/hermes/bin/hermes`). Previously the two duplicated the logic and could drift.
+
 ## [0.1.18] - 2026-06-12
 
 ### Fixed

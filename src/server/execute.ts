@@ -67,9 +67,11 @@ function stripReasoningEffort(args: string[]): string[] {
   return out;
 }
 
-// Binary to spawn: UI `hermesCommand`, else PAPERCLIP_HERMES_CLI (compose env),
-// else the /opt/hermes/bin/hermes mount target.
-function resolveHermesCommand(config: Record<string, unknown>): string {
+// Binary to spawn: UI `hermesCommand`, else PAPERCLIP_HERMES_CLI (compose env —
+// lets the operator/bento own the path without republishing the plugin), else
+// the /opt/hermes/bin/hermes mount target. Exported so test.ts resolves the
+// exact same binary as the wake.
+export function resolveHermesCommand(config: Record<string, unknown>): string {
   return (
     cfgString(config.hermesCommand) ||
     process.env.PAPERCLIP_HERMES_CLI ||
@@ -558,9 +560,6 @@ export async function execute(
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = resolveHermesCommand(config);
 
-  // `-m` is passed only when a model is pinned; otherwise Hermes resolves the
-  // model + provider from ~/.hermes/config.yaml.
-  const model = cfgString(config.model);
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
@@ -576,10 +575,6 @@ export async function execute(
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
 
-  // "Model" and "Thinking effort" are universal Paperclip fields the plugin
-  // doesn't forward — both are owned by Hermes' config.yaml. `config.model` is
-  // only set when pinned explicitly via the API.
-
   // ── Build prompt (bundle prepended) ────────────────────────────────────
   const prompt = buildPrompt(ctx, config);
 
@@ -587,10 +582,6 @@ export async function execute(
   const useQuiet = cfgBoolean(config.quiet) !== false;
   const args: string[] = ["chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
-
-  if (model) {
-    args.push("-m", model);
-  }
 
   if (toolsets) {
     args.push("-t", toolsets);
@@ -691,7 +682,7 @@ export async function execute(
   // ── Log start ──────────────────────────────────────────────────────────
   await ctx.onLog(
     "stdout",
-    `[hermes] Starting Hermes Agent (model=${model ?? "hermes default"}, timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
+    `[hermes] Starting Hermes Agent (timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
   );
   if (prevSessionId) {
     await ctx.onLog("stdout", `[hermes] Resuming session: ${prevSessionId}\n`);
@@ -768,7 +759,6 @@ export async function execute(
     exitCode: result.exitCode,
     signal: result.signal,
     timedOut: result.timedOut,
-    model,
   };
 
   if (parsed.errorMessage) {
@@ -794,9 +784,8 @@ export async function execute(
       if (sessionMetrics?.costUsd != null) {
         executionResult.costUsd = sessionMetrics.costUsd;
       }
-      // The plugin doesn't pick the model/provider (Hermes resolves them from
-      // config.yaml), so surface what Hermes actually used — otherwise the Run
-      // page badge shows "unknown/unknown".
+      // Plugin doesn't pick model/provider — surface what Hermes actually used
+      // so the Run page badge isn't "unknown/unknown".
       if (sessionMetrics?.model) {
         executionResult.model = sessionMetrics.model;
       }
